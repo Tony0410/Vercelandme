@@ -1,5 +1,15 @@
 const KNOWLEDGE = `
-You are the Bed Guide for an older couple in Perth, Western Australia. Answer only from the following curated research. Use plain, calm English. Keep answers concise and practical. Never diagnose, prescribe treatment, or claim a bed/rail/mattress is clinically safe for a person. When individual clinical factors matter, say an OT, physiotherapist, discharge planner, doctor, or supplier should confirm them.
+You are the Bed Guide for an older couple in Perth, Western Australia.
+
+IMPORTANT RESPONSE RULES
+- Give only the final answer. Never reveal hidden reasoning, chain-of-thought, scratch work, internal deliberation, or a "thinking process".
+- Answer only from the curated research below and the user's saved selections.
+- Use plain, calm English suitable for older adults.
+- Keep most answers to 2-5 short paragraphs or a few short bullets.
+- Never diagnose, prescribe treatment, or claim a bed, rail, or mattress is clinically safe for a particular person.
+- When individual clinical factors matter, say an OT, physiotherapist, discharge planner, doctor, or supplier should confirm them.
+- If the research does not answer the question, say so rather than guessing.
+- Prices, stock and delivery terms can change. Treat researched prices as indicative and tell the user to confirm them.
 
 CORE RESEARCH
 - The key requirement is genuine electric whole-bed/platform height adjustment, not just an adjustable head and foot.
@@ -17,7 +27,6 @@ CORE RESEARCH
 - DVA RAP may be relevant for eligible Gold Card or relevant White Card holders, with clinical prescription/assessment.
 - Private health insurance varies by policy. Ask about home nursing equipment/durable medical equipment/aids and appliances, prescription requirements, approved suppliers, pre-authorisation and itemised invoices.
 - Supplier questions: exact platform and top-of-mattress heights; exact mattress type; proposed rail dimensions and entrapment assessment; brake type; whether delivery includes bedroom placement, assembly, electrical check and demonstration; stairs/narrow access surcharges; rental inclusions, cleaning, repairs, collection and bond; separate warranties; earliest confirmed delivery date; and whether hire can be extended or converted toward purchase.
-- Prices, stock and delivery terms can change. Treat all researched prices as indicative and confirm them directly with suppliers.
 
 If asked something not covered by the research, say that the research does not answer it and suggest the most appropriate clinician, supplier, insurer, or aged-care provider to ask.
 `;
@@ -32,6 +41,33 @@ function fallbackAnswer(q) {
   if (s.includes("xcel")) return "The Xcel3Pro is the stronger starting option where very-low sleeping position, higher falls risk or regular carer involvement matters. Its researched height range is 11-73.5 cm with 250 kg SWL. Ask Unicare for a current quote and whether a trial is available.";
   if (s.includes("icare") || s.includes("ic333")) return "The IC333 is the more home-like long-term option in the research. It has genuine 22-66 cm whole-bed height adjustment and a researched Perth base price around $3,475-$3,800, with mattress usually extra.";
   return "I can help with the shortlisted beds, rails, hire versus buy, supplier questions and funding pathways from the research. For an individual clinical decision, an OT or physiotherapist should confirm the safe transfer height, mattress and rail setup.";
+}
+
+function cleanAnswer(text) {
+  let answer = String(text || "").trim();
+  const markers = [
+    "Here's a thinking process:",
+    "Here is a thinking process:",
+    "Thinking process:",
+    "Chain of thought:",
+    "Reasoning:"
+  ];
+  for (const marker of markers) {
+    if (answer.startsWith(marker)) {
+      const finalMarkers = ["Final answer:", "Final:", "Answer:"];
+      let found = "";
+      for (const fm of finalMarkers) {
+        const idx = answer.lastIndexOf(fm);
+        if (idx >= 0) {
+          found = answer.slice(idx + fm.length).trim();
+          break;
+        }
+      }
+      if (found) answer = found;
+      else throw new Error("Provider returned reasoning instead of a final answer");
+    }
+  }
+  return answer;
 }
 
 async function callProvider(url, key, model, messages, extraHeaders = {}) {
@@ -54,7 +90,7 @@ async function callProvider(url, key, model, messages, extraHeaders = {}) {
   const data = await response.json();
   const answer = data?.choices?.[0]?.message?.content;
   if (!answer || typeof answer !== "string") throw new Error("No answer returned");
-  return answer.trim();
+  return cleanAnswer(answer);
 }
 
 module.exports = async function handler(req, res) {
@@ -75,10 +111,25 @@ module.exports = async function handler(req, res) {
 
   const messages = [
     { role: "system", content: KNOWLEDGE },
-    { role: "user", content: context ? `Current selections/context: ${context}\n\nQuestion: ${question}` : question }
+    { role: "user", content: context ? `Current selections/context: ${context}\n\nQuestion: ${question}\n\nGive only the final answer, with no hidden reasoning or thinking process.` : `${question}\n\nGive only the final answer, with no hidden reasoning or thinking process.` }
   ];
 
   const attempts = [];
+
+  // Kilo Auto Free is first because its curated free router behaved more consistently
+  // in our live provider check. OpenRouter's free router remains the automatic fallback.
+  if (process.env.KILO_API_KEY) {
+    try {
+      const answer = await callProvider(
+        "https://api.kilo.ai/api/gateway/chat/completions",
+        process.env.KILO_API_KEY,
+        "kilo-auto/free",
+        messages
+      );
+      return res.status(200).json({ answer, source: "Bed Guide AI" });
+    } catch (e) { attempts.push("Kilo"); }
+  }
+
   if (process.env.OPENROUTER_API_KEY) {
     try {
       const answer = await callProvider(
@@ -91,21 +142,14 @@ module.exports = async function handler(req, res) {
           "X-Title": "Perth Hospital Bed Helper"
         }
       );
-      return res.status(200).json({ answer, source: "AI" });
+      return res.status(200).json({ answer, source: "Bed Guide AI" });
     } catch (e) { attempts.push("OpenRouter"); }
   }
 
-  if (process.env.KILO_API_KEY) {
-    try {
-      const answer = await callProvider(
-        "https://api.kilo.ai/api/gateway/chat/completions",
-        process.env.KILO_API_KEY,
-        "kilo-auto/free",
-        messages
-      );
-      return res.status(200).json({ answer, source: "AI" });
-    } catch (e) { attempts.push("Kilo"); }
-  }
-
-  return res.status(200).json({ answer: fallbackAnswer(question), source: "Built-in guide", fallback: true, attempted: attempts });
+  return res.status(200).json({
+    answer: fallbackAnswer(question),
+    source: "Built-in research guide",
+    fallback: true,
+    attempted: attempts
+  });
 };
